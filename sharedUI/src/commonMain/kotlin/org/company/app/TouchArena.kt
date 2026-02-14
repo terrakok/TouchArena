@@ -28,13 +28,13 @@ import kotlin.time.Clock
 data class PointData(val t: Long, val y: Float)
 
 data class LsqResult(
-    val c: Double, // Constant term
-    val b: Double, // Linear term
-    val a: Double, // Quadratic term
+    val c: Float, // Constant term
+    val b: Float, // Linear term
+    val a: Float, // Quadratic term
     val t0: Long   // Time offset for normalization
 )
 
-// --- Math Logic (Ported from JS) ---
+// --- Math Logic ---
 object MathUtils {
     fun solveLSQ2(points: List<PointData>): LsqResult? {
         val n = points.size
@@ -42,11 +42,11 @@ object MathUtils {
 
         val t0 = points[0].t
         // Normalize time to avoid huge numbers in matrix
-        val normT = points.map { (it.t - t0).toDouble() }
-        val y = points.map { it.y.toDouble() }
+        val normT = points.map { (it.t - t0).toFloat() }
+        val y = points.map { it.y }
 
-        var s1 = 0.0; var s2 = 0.0; var s3 = 0.0; var s4 = 0.0
-        var sy = 0.0; var sty = 0.0; var st2y = 0.0
+        var s1 = 0.0f; var s2 = 0.0f; var s3 = 0.0f; var s4 = 0.0f
+        var sy = 0.0f; var sty = 0.0f; var st2y = 0.0f
 
         for (i in 0 until n) {
             val ti = normT[i]
@@ -68,13 +68,13 @@ object MathUtils {
         // | s2 s3 s4 | | a |   | st2y |
 
         val m = arrayOf(
-            doubleArrayOf(n.toDouble(), s1, s2),
-            doubleArrayOf(s1, s2, s3),
-            doubleArrayOf(s2, s3, s4)
+            arrayOf(n.toFloat(), s1, s2),
+            arrayOf(s1, s2, s3),
+            arrayOf(s2, s3, s4)
         )
-        val rhs = doubleArrayOf(sy, sty, st2y)
+        val rhs = arrayOf(sy, sty, st2y)
 
-        val det = { mat: Array<DoubleArray> ->
+        val det = { mat: Array<Array<Float>> ->
             mat[0][0] * (mat[1][1] * mat[2][2] - mat[1][2] * mat[2][1]) -
                     mat[0][1] * (mat[1][0] * mat[2][2] - mat[1][2] * mat[2][0]) +
                     mat[0][2] * (mat[1][0] * mat[2][1] - mat[1][1] * mat[2][0])
@@ -83,9 +83,11 @@ object MathUtils {
         val D = det(m)
         if (abs(D) < 1e-12) return null
 
-        fun solve(idx: Int): Double {
+        fun cloneArray(arr: Array<Float>) = Array(arr.size) { arr[it] }
+
+        fun solve(idx: Int): Float {
             // Clone matrix and replace column 'idx' with rhs
-            val temp = Array(3) { r -> m[r].clone() }
+            val temp = Array(3) { r -> cloneArray(m[r]) }
             for (i in 0 until 3) temp[i][idx] = rhs[i]
             return det(temp) / D
         }
@@ -99,14 +101,6 @@ object MathUtils {
 fun SplitScreenTracker() {
     // State
     val points = remember { mutableStateListOf<PointData>() }
-    // Initial dummy data to match JS example
-    LaunchedEffect(Unit) {
-        points.addAll(listOf(
-            PointData(10000, 1162f),
-            PointData(10001, 679f),
-            PointData(10022, 194f)
-        ))
-    }
 
     val lsqResult = remember(points.size, points.lastOrNull()) {
         MathUtils.solveLSQ2(points)
@@ -165,13 +159,13 @@ fun StatsOverlay(
 ) {
     val statsText = remember(result, lastPoint) {
         if (result != null && lastPoint != null) {
-            val relT = (lastPoint.t - result.t0).toDouble()
+            val relT = lastPoint.t - result.t0
             // v = 2at + b
-            val velocity = 2 * result.a * relT + result.b
+            val velocity = (2 * result.a * relT + result.b) * 1000
             // acc = 2a
             val accel = 2 * result.a
 
-            "Velocity: ${(velocity * 1000).toFloat()} px/s\nSystem velocity: ${systemVelocity.y} px/s\nAccel: ${accel.toFloat()} px/ms²"
+            "Velocity: $velocity px/s\nSystem velocity: ${systemVelocity.y} px/s\nAccel: $accel px/ms²"
         } else {
             "Velocity: 0 px/ms\nAccel: 0 px/ms²"
         }
