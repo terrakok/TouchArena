@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LSQ2 Split Screen Tracker</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            height: 100%;
+            overflow: hidden;
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            background: #f0f2f5;
+        }
+        .container {
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+        }
+        /* Top half: Graph */
+        .chart-section {
+            flex: 1;
+            min-height: 50%;
+            padding: 10px;
+            box-sizing: border-box;
+            background: #ffffff;
+            border-bottom: 2px solid #ddd;
+        }
+        /* Bottom half: Touch area */
+        .touch-section {
+            flex: 1;
+            min-height: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            position: relative;
+            cursor: crosshair;
+            background: #ffffff;
+            touch-action: none;
+            user-select: none;
+        }
+        #touchArea {
+            width: 90%;
+            height: 80%;
+            border: 3px dashed #3498db;
+            border-radius: 20px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #3498db;
+            font-size: 1.5rem;
+            font-weight: bold;
+            text-align: center;
+        }
+        .stats {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            background: rgba(0, 0, 0, 0.7);
+            color: white;
+            padding: 10px;
+            border-radius: 8px;
+            font-size: 0.8rem;
+            pointer-events: none;
+            z-index: 10;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <div class="chart-section">
+        <canvas id="motionChart"></canvas>
+    </div>
+    <div class="touch-section" id="touchPanel">
+        <div id="touchArea">DRAW GESTURE HERE</div>
+        <div class="stats" id="stats">
+            Velocity: 0 px/ms<br>
+            Accel: 0 px/ms²
+        </div>
+    </div>
+</div>
+
+<script>
+    const touchPanel = document.getElementById('touchPanel');
+    const statsEl = document.getElementById('stats');
+    const ctx = document.getElementById('motionChart').getContext('2d');
+    let chart;
+    let rawPoints;
+
+    let startTime = 0;
+    let isDrawing = false;
+
+    function solveLSQ2(t, y) {
+        const n = t.length;
+        if (n < 3) return null;
+        const t0 = t[0];
+        const normT = t.map(v => v - t0);
+
+        let s1 = 0, s2 = 0, s3 = 0, s4 = 0, sy = 0, sty = 0, st2y = 0;
+        for (let i = 0; i < n; i++) {
+            const ti = normT[i], yi = y[i], ti2 = ti * ti;
+            s1 += ti;
+            s2 += ti2;
+            s3 += ti2 * ti;
+            s4 += ti2 * ti2;
+            sy += yi;
+            sty += ti * yi;
+            st2y += ti2 * yi;
+        }
+
+        const m = [[n, s1, s2], [s1, s2, s3], [s2, s3, s4]];
+        const rhs = [sy, sty, st2y];
+        const det = (m) => m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+        const D = det(m);
+        if (Math.abs(D) < 1e-12) return null;
+
+        const solve = (idx) => {
+            let temp = JSON.parse(JSON.stringify(m));
+            for (let i = 0; i < 3; i++) temp[i][idx] = rhs[i];
+            return det(temp) / D;
+        };
+        return {coeffs: [solve(0), solve(1), solve(2)], t0};
+    }
+
+    function updateChart(points, result) {
+        let yFit = [];
+        let tangentPoints = [];
+
+        if (result) {
+            const [c, b, a] = result.coeffs;
+            const tLast = points[points.length - 1].t;
+            const relTLast = tLast - result.t0;
+            points.forEach((p) => {
+                const relT = p.t - result.t0;
+                yFit.push({x: p.t, y: a * relT * relT + b * relT + c});
+            });
+
+            const yAtEnd = a * relTLast * relTLast + b * relTLast + c;
+            const velocityAtEnd = 2 * a * relTLast + b;
+            const acceleration = 2 * a; // Constant for degree 2
+
+            statsEl.innerHTML = `Velocity: ${velocityAtEnd.toFixed(2)} px/ms<br>Accel: ${acceleration.toFixed(4)} px/ms²`;
+
+            tangentPoints.push({x: tLast, y: yAtEnd});
+            const predictionTime = points.length === 3 ? 15 : 150;
+            tangentPoints.push({x: tLast + predictionTime, y: yAtEnd + velocityAtEnd * predictionTime});
+        }
+
+        if (chart) chart.destroy();
+        chart = new Chart(ctx, {
+            data: {
+                datasets: [
+                    {
+                        type: 'line',
+                        label: 'Touch Events',
+                        data: points.map(p => ({x: p.t, y: p.y})),
+                        borderColor: '#95a5a6',
+                        showLine: false,
+                        pointRadius: 5,
+                        backgroundColor: '#2c3e50'
+                    },
+                    {
+                        type: 'line',
+                        label: 'LSQ2 Smooth Path',
+                        data: yFit,
+                        borderColor: '#3498db',
+                        borderWidth: 4,
+                        pointRadius: 0,
+                        fill: false,
+                        tension: 0.2
+                    },
+                    {
+                        type: 'line',
+                        label: 'Tangent (Velocity vector)',
+                        data: tangentPoints,
+                        borderColor: '#e74c3c',
+                        borderWidth: 2,
+                        borderDash: [8, 4],
+                        pointRadius: 0,
+                        fill: false
+                    }
+                ]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                scales: {
+                    x: {type: 'linear', title: {display: true, text: 'Time (ms)'}},
+                    y: {reverse: true, title: {display: true, text: 'Y Position (px)'}}
+                }
+            }
+        });
+    }
+
+    function handleStart(e) {
+        isDrawing = true;
+        rawPoints = [];
+        startTime = Date.now();
+        document.getElementById('touchArea').style.borderColor = '#2ecc71';
+    }
+    function handleMove(e) {
+        if (!isDrawing) return;
+        const ev = e.touches ? e.touches[0] : e;
+        const rect = touchPanel.getBoundingClientRect();
+        rawPoints.push({t: Date.now() - startTime, y: ev.clientY - rect.top});
+        if (rawPoints.length > 20) rawPoints.shift();
+    }
+    function handleEnd() {
+        isDrawing = false;
+        document.getElementById('touchArea').style.borderColor = '#3498db';
+        if (rawPoints.length < 3) return;
+        const res = solveLSQ2(rawPoints.map(p => p.t), rawPoints.map(p => p.y));
+        updateChart(rawPoints, res);
+    }
+
+    touchPanel.addEventListener('mousedown', handleStart);
+    window.addEventListener('mousemove', handleMove);
+    window.addEventListener('mouseup', handleEnd);
+    touchPanel.addEventListener('touchstart', (e) => {
+        e.preventDefault();
+        handleStart();
+    });
+    touchPanel.addEventListener('touchmove', (e) => {
+        e.preventDefault();
+        handleMove(e);
+    });
+    touchPanel.addEventListener('touchend', handleEnd);
+</script>
+</body>
+</html>
