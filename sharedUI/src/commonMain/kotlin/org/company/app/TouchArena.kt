@@ -36,6 +36,77 @@ data class LsqResult(
 
 // --- Math Logic ---
 object MathUtils {
+    // Smart velocity
+    data class VelocityResult(val velocity: Double, val strategy: String)
+
+    fun calculateVelocity(points: List<PointData>): VelocityResult {
+        val n = points.size
+        if (n < 2) return VelocityResult(0.0, "None")
+
+        val lastPoint = points.last()
+        val firstPoint = points.first()
+
+        val totalTime = lastPoint.t - firstPoint.t
+        if (totalTime == 0L) return VelocityResult(0.0, "Instant")
+
+        val averageVelocity = (lastPoint.y - firstPoint.y).toDouble() / totalTime
+
+        if (n < 4) {
+            val lsq1 = solveLSQ1(points)
+            return VelocityResult(lsq1.b, "LSQ1 (Linear)")
+        }
+
+        val lsq2 = solveLSQ2(points) ?: return VelocityResult(averageVelocity, "Avg (Error)")
+
+        val relT = (lastPoint.t - lsq2.t0).toDouble()
+        val lsq2Velocity = 2 * lsq2.a * relT + lsq2.b
+
+        val isDirectionWrong = (lsq2Velocity > 0 && averageVelocity < 0) ||
+                (lsq2Velocity < 0 && averageVelocity > 0)
+
+        return if (isDirectionWrong) {
+            val lsq1 = solveLSQ1(points)
+            VelocityResult(lsq1.b, "LSQ1 (Fallback)")
+        } else {
+            VelocityResult(lsq2Velocity, "LSQ2 (Quadratic)")
+        }
+    }
+
+    // --- LSQ1 (y = bt + c) ---
+    data class Lsq1Result(val b: Double, val c: Double)
+
+    private fun solveLSQ1(points: List<PointData>): Lsq1Result {
+        val n = points.size
+        val t0 = points[0].t
+        val normT = points.map { (it.t - t0).toDouble() }
+        val y = points.map { it.y.toDouble() }
+
+        var s1 = 0.0; var s2 = 0.0
+        var sy = 0.0; var sty = 0.0
+
+        for (i in 0 until n) {
+            val ti = normT[i]
+            val yi = y[i]
+            s1 += ti
+            s2 += ti * ti
+            sy += yi
+            sty += ti * yi
+        }
+
+        // Determinant
+        val det = n * s2 - s1 * s1
+        if (abs(det) < 1e-9) return Lsq1Result(0.0, 0.0)
+
+        // Cramer for 2x2
+        // | n  s1 | | c | = | sy  |
+        // | s1 s2 | | b |   | sty |
+
+        val c = (s2 * sy - s1 * sty) / det
+        val b = (n * sty - s1 * sy) / det // Это и есть скорость (slope)
+
+        return Lsq1Result(b, c)
+    }
+
     fun solveLSQ2(points: List<PointData>): LsqResult? {
         val n = points.size
         if (n < 3) return null
@@ -106,6 +177,10 @@ fun SplitScreenTracker() {
         MathUtils.solveLSQ2(points)
     }
 
+    val smartVelocity = remember(points.size, points.lastOrNull()) {
+        MathUtils.calculateVelocity(points)
+    }
+
     val systemVelocity = remember(points.size, points.lastOrNull()) {
         val tracker = VelocityTracker()
         points.forEach { tracker.addPosition(it.t, Offset(0f, it.y)) }
@@ -123,7 +198,7 @@ fun SplitScreenTracker() {
                 .padding(10.dp)
         ) {
             if (points.isNotEmpty()) {
-                MotionChart(points, lsqResult)
+                MotionChart(points, lsqResult, smartVelocity)
             } else {
                 Text("No data", Modifier.align(Alignment.Center))
             }
@@ -146,7 +221,7 @@ fun SplitScreenTracker() {
             )
 
             // Stats Overlay
-            StatsOverlay(lsqResult, systemVelocity, points.lastOrNull())
+            StatsOverlay(lsqResult, smartVelocity, systemVelocity, points.lastOrNull())
         }
     }
 }
@@ -154,6 +229,7 @@ fun SplitScreenTracker() {
 @Composable
 fun StatsOverlay(
     result: LsqResult?,
+    smartVelocity: MathUtils.VelocityResult,
     systemVelocity: Velocity,
     lastPoint: PointData?
 ) {
@@ -165,7 +241,7 @@ fun StatsOverlay(
             // acc = 2a
             val accel = 2 * result.a
 
-            "Velocity: $velocity px/s\nSystem velocity: ${systemVelocity.y} px/s\nAccel: $accel px/ms²"
+            "Velocity: $velocity px/s\nSmart velocity: ${(smartVelocity.velocity * 1000).toFloat()} px/s\nSystem velocity: ${systemVelocity.y} px/s\nAccel: $accel px/ms²"
         } else {
             "Velocity: 0 px/ms\nAccel: 0 px/ms²"
         }
@@ -237,7 +313,7 @@ fun TouchPad(onDrawStart: () -> Unit, onDrawMove: (Long, Float) -> Unit) {
 }
 
 @Composable
-fun MotionChart(points: List<PointData>, result: LsqResult?) {
+fun MotionChart(points: List<PointData>, result: LsqResult?, smartVelocity: MathUtils.VelocityResult) {
     Canvas(modifier = Modifier.fillMaxSize()) {
         if (points.isEmpty()) return@Canvas
 
@@ -329,6 +405,20 @@ fun MotionChart(points: List<PointData>, result: LsqResult?) {
                 color = Color(0xFFE74C3C),
                 start = startVec,
                 end = endVec,
+                strokeWidth = 2.dp.toPx(),
+                pathEffect = PathEffect.dashPathEffect(floatArrayOf(10f, 10f), 0f)
+            )
+
+            // Smart Velocity
+            val smartT = lastT + 150 // 150ms projection
+            val smartY = lastYCalc + smartVelocity.velocity.toFloat() * 150
+
+            val endSmartVec = Offset(mapX(smartT), mapY(smartY))
+
+            drawLine(
+                color = Color(0xFF4DE73C),
+                start = startVec,
+                end = endSmartVec,
                 strokeWidth = 2.dp.toPx(),
                 pathEffect = PathEffect.dashPathEffect(floatArrayOf(10f, 10f), 0f)
             )
